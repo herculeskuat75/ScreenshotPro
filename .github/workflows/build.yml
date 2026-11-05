@@ -1,0 +1,93 @@
+name: Build CustomScreenshot APK (Debug)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Siapkan proyek (ZIP di root diekstrak otomatis)
+        run: |
+          set -e
+          WORK="$RUNNER_TEMP/proj"
+          rm -rf "$WORK" && mkdir -p "$WORK"
+          ZIP=""; BEST=0
+          for z in ./*.zip; do
+            [ -f "$z" ] || continue
+            t=$(git log -1 --format=%ct -- "$z" 2>/dev/null || echo 0)
+            [ -z "$t" ] && t=0
+            if [ -z "$ZIP" ] || [ "$t" -gt "$BEST" ]; then ZIP="$z"; BEST="$t"; fi
+          done
+          if [ -n "$ZIP" ]; then
+            unzip -q -o "$ZIP" -d "$WORK"
+            SRC="$WORK"
+          else
+            SRC="$GITHUB_WORKSPACE"
+          fi
+          SET=$(find "$SRC" -maxdepth 5 \( -name settings.gradle.kts -o -name settings.gradle \) \
+                  -not -path '*/__MACOSX/*' -not -path '*/.git/*' -not -path '*/build/*' \
+                | awk '{ print gsub("/","/"), $0 }' | sort -n | head -n 1 | cut -d' ' -f2-)
+          if [ -z "$SET" ]; then
+            echo "ERROR: settings.gradle(.kts) tidak ditemukan."
+            exit 1
+          fi
+          PROJ_DIR=$(dirname "$SET")
+          echo "PROJ_DIR=$PROJ_DIR" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build DEBUG APK
+        working-directory: ${{ env.PROJ_DIR }}
+        run: |
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          else
+            gradle :app:assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: Kumpulkan APK
+        run: |
+          APK=$(find "$PROJ_DIR" -path '*/outputs/apk/debug/*.apk' | head -n 1)
+          if [ -z "$APK" ]; then echo "ERROR: APK tidak ditemukan"; exit 1; fi
+          cp "$APK" "$GITHUB_WORKSPACE/CustomScreenshot-Debug.apk"
+          echo "TAG=build-$(date -u +%Y%m%d-%H%M%S)-${{ github.run_number }}" >> "$GITHUB_ENV"
+
+      - name: Upload APK (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CustomScreenshot-APK
+          path: CustomScreenshot-Debug.apk
+
+      - name: Buat Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: CustomScreenshot ${{ env.TAG }}
+          files: CustomScreenshot-Debug.apk
+          make_latest: true
